@@ -1,0 +1,8 @@
+# Ignore the massive training dataset
+UNSW_NB15_training-set.csv
+
+# Ignore Mac system files
+.DS_Store
+
+# Ignore Python cache
+__pycache__/
