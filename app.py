@@ -160,13 +160,17 @@ def H(s: str):
 # ---------------------------------------------------------
 # 2. Models
 # ---------------------------------------------------------
+# ---------------------------------------------------------
 @st.cache_resource
 def load_ai_pipeline():
+    # Load all components natively using joblib
     scaler = joblib.load("standard_scaler.pkl")
     iso_forest = joblib.load("iso_forest.pkl")
     label_encoder = joblib.load("label_encoder.pkl")
-    xgb_model = xgb.XGBClassifier()
-    xgb_model.load_model("xgboost_model.json")
+    
+    # Bypasses JSON parsing entirely
+    xgb_model = joblib.load("xgboost_model.pkl") 
+    
     return scaler, iso_forest, label_encoder, xgb_model
 
 
