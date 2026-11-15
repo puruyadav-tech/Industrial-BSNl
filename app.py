@@ -7,131 +7,448 @@ Original file is located at
     https://colab.research.google.com/drive/1Hbt9jPH2RcsiljCvOy1j5Cg_GSB2In2m
 """
 
-import streamlit as st
-import pandas as pd
-import joblib
-import xgboost as xgb
 import warnings
 
-# Suppress scikit-learn version warnings for deployment
+import altair as alt
+import joblib
+import numpy as np
+import pandas as pd
+import streamlit as st
+import xgboost as xgb
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
 st.set_page_config(
-    page_title="BSNL NOC Threat Dashboard",
+    page_title="NGN Threat Console | BSNL",
     page_icon="🛡️",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
+EXPECTED_FEATURES = ["sttl", "ct_dst_src_ltm", "sbytes", "sload"]
+
+# Palette
+INK = "#0A1226"
+PANEL = "#111B36"
+LINE = "#22305A"
+TEXT = "#E8EEFF"
+MUTED = "#8C9BC4"
+BLUE = "#4F8CFF"
+AMBER = "#FFB020"
+CORAL = "#FF5C5C"
+MINT = "#2EE6A6"
+THREAT_COLORS = [CORAL, AMBER, "#C084FC", "#38BDF8", "#F472B6", "#A3E635", "#FB923C", "#2DD4BF", "#E879F9", "#60A5FA"]
+
 # ---------------------------------------------------------
-# 1. Cache the Models in Memory
+# 1. Styling
+# ---------------------------------------------------------
+CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+
+html, body, [class*="css"], .stApp { font-family: 'IBM Plex Sans', sans-serif; color: #E8EEFF; }
+h1, h2, h3, h4 { font-family: 'Sora', sans-serif !important; letter-spacing: -0.02em; }
+
+.stApp {
+  background:
+    radial-gradient(1100px 520px at 88% -8%, rgba(79,140,255,.20), transparent 60%),
+    radial-gradient(800px 420px at -5% 105%, rgba(255,176,32,.08), transparent 60%),
+    linear-gradient(rgba(79,140,255,.045) 1px, transparent 1px) 0 0 / 44px 44px,
+    linear-gradient(90deg, rgba(79,140,255,.045) 1px, transparent 1px) 0 0 / 44px 44px,
+    #0A1226;
+}
+[data-testid="stHeader"] { background: transparent; }
+#MainMenu, footer { visibility: hidden; }
+.block-container { padding-top: 2.2rem; padding-bottom: 4rem; max-width: 1280px; }
+
+/* Sidebar */
+[data-testid="stSidebar"] { background: #0C1530; border-right: 1px solid #22305A; }
+[data-testid="stSidebar"] .block-container { padding-top: 1.5rem; }
+[data-testid="stFileUploader"] section {
+  background: rgba(79,140,255,.06); border: 1.5px dashed #34498A; border-radius: 14px; padding: 1rem;
+}
+[data-testid="stFileUploader"] section:hover { border-color: #4F8CFF; background: rgba(79,140,255,.10); }
+
+/* Buttons */
+.stButton > button, .stDownloadButton > button {
+  font-family: 'Sora', sans-serif; font-weight: 600; border-radius: 12px; padding: .7rem 1.4rem;
+  border: 1px solid #34498A; background: #111B36; color: #E8EEFF; transition: all .18s ease;
+}
+.stButton > button:hover, .stDownloadButton > button:hover { border-color: #4F8CFF; color: #fff; transform: translateY(-1px); }
+.stButton > button[kind="primary"] {
+  background: linear-gradient(135deg, #4F8CFF 0%, #2F5FE0 100%); border: none; color: #fff;
+  box-shadow: 0 10px 30px -10px rgba(79,140,255,.8);
+}
+.stButton > button[kind="primary"]:hover { box-shadow: 0 14px 36px -10px rgba(79,140,255,1); }
+
+/* Tabs */
+.stTabs [data-baseweb="tab-list"] { gap: 4px; border-bottom: 1px solid #22305A; }
+.stTabs [data-baseweb="tab"] { font-family: 'Sora', sans-serif; font-weight: 600; color: #8C9BC4; padding: .7rem 1.1rem; }
+.stTabs [aria-selected="true"] { color: #fff; }
+.stTabs [data-baseweb="tab-highlight"] { background: #4F8CFF; height: 3px; border-radius: 3px; }
+
+/* Dataframes */
+[data-testid="stDataFrame"] { border: 1px solid #22305A; border-radius: 14px; overflow: hidden; }
+
+/* Hero */
+.hero { display: grid; grid-template-columns: 1fr auto; gap: 2rem; align-items: center; margin-bottom: 1.6rem; }
+.hero h1 { font-size: 3rem; line-height: 1.02; margin: 0 0 .7rem 0; font-weight: 800; color: #fff; }
+.hero p { color: #8C9BC4; font-size: 1.08rem; max-width: 560px; line-height: 1.55; margin: 0; }
+.live { display: inline-flex; align-items: center; gap: .55rem; padding: .35rem .8rem; border-radius: 999px;
+  background: rgba(46,230,166,.10); border: 1px solid rgba(46,230,166,.35); color: #2EE6A6; font-size: .85rem; font-weight: 500; margin-bottom: 1rem; }
+.live.off { background: rgba(255,92,92,.10); border-color: rgba(255,92,92,.4); color: #FF5C5C; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 0 currentColor; animation: pulse 1.8s infinite; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(46,230,166,.6);} 70% { box-shadow: 0 0 0 9px rgba(46,230,166,0);} 100% { box-shadow: 0 0 0 0 rgba(46,230,166,0);} }
+
+.gauge { display: flex; align-items: center; gap: 1.2rem; background: linear-gradient(160deg, #142046 0%, #0E1733 100%);
+  border: 1px solid #22305A; border-radius: 24px; padding: 1.1rem 1.8rem 1.1rem 1.2rem; box-shadow: 0 30px 60px -30px rgba(0,0,0,.8); }
+.gauge .lvl-label { color: #8C9BC4; font-size: .9rem; }
+.gauge .lvl { font-family: 'Sora', sans-serif; font-weight: 800; font-size: 1.7rem; line-height: 1.1; }
+.gauge .sub { color: #8C9BC4; font-size: .85rem; margin-top: .3rem; max-width: 170px; }
+.ring-fill { animation: sweep 1.3s cubic-bezier(.2,.8,.2,1) both; }
+@keyframes sweep { from { stroke-dashoffset: 326.7; } }
+
+/* KPI cards */
+.kpis { display: grid; grid-template-columns: 1.1fr 1.1fr 1.4fr 1fr; gap: 14px; margin: 1.2rem 0 1.8rem; }
+.kpi { background: #111B36; border: 1px solid #22305A; border-radius: 18px; padding: 1.1rem 1.3rem; position: relative; overflow: hidden; }
+.kpi::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--c, #4F8CFF); }
+.kpi .k { color: #8C9BC4; font-size: .88rem; margin-bottom: .35rem; }
+.kpi .v { font-family: 'Sora', sans-serif; font-weight: 700; font-size: 2rem; line-height: 1.1; color: #fff; }
+.kpi .s { color: #8C9BC4; font-size: .82rem; margin-top: .35rem; }
+.kpi.wide .v { font-size: 1.6rem; }
+
+/* Section header */
+.sec { font-family: 'Sora', sans-serif; font-weight: 600; font-size: 1.15rem; margin: .2rem 0 .2rem; color: #fff; }
+.sec-sub { color: #8C9BC4; font-size: .92rem; margin-bottom: .8rem; }
+.panel { background: #111B36; border: 1px solid #22305A; border-radius: 20px; padding: 1.2rem 1.3rem .6rem; }
+
+/* Pipeline (empty state) */
+.pipe { display: grid; grid-template-columns: 1fr 34px 1fr 34px 1fr; align-items: stretch; gap: 0; margin: 1.4rem 0; }
+.stage { background: #111B36; border: 1px solid #22305A; border-radius: 18px; padding: 1.3rem; }
+.stage.hot { border-color: #4F8CFF; background: linear-gradient(160deg, #15224D, #111B36); }
+.stage h4 { margin: 0 0 .4rem; font-size: 1.05rem; color: #fff; }
+.stage p { margin: 0; color: #8C9BC4; font-size: .9rem; line-height: 1.5; }
+.stage .tag { display: inline-block; font-size: .78rem; padding: .15rem .6rem; border-radius: 999px; margin-bottom: .7rem;
+  background: rgba(79,140,255,.14); color: #8FB4FF; border: 1px solid rgba(79,140,255,.3); }
+.arrow { display: flex; align-items: center; justify-content: center; color: #34498A; font-size: 1.4rem; }
+
+.chip { display: inline-flex; align-items: center; gap: .45rem; font-size: .85rem; color: #C9D4F5; margin: .15rem 0; }
+.chip .d { width: 7px; height: 7px; border-radius: 50%; }
+.brand { display: flex; align-items: center; gap: .7rem; margin-bottom: 1.4rem; }
+.brand .logo { width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center; font-size: 1.2rem;
+  background: linear-gradient(135deg, #4F8CFF, #2F5FE0); box-shadow: 0 8px 20px -8px #4F8CFF; }
+.brand b { font-family: 'Sora', sans-serif; font-size: 1.05rem; color: #fff; display: block; line-height: 1.15; }
+.brand span { color: #8C9BC4; font-size: .8rem; }
+.schema { background: rgba(79,140,255,.07); border: 1px solid #22305A; border-radius: 12px; padding: .7rem .9rem; font-size: .85rem; color: #C9D4F5; line-height: 1.7; }
+.schema code { background: #0A1226; color: #8FB4FF; border-radius: 6px; padding: .1rem .4rem; }
+
+@media (max-width: 900px) {
+  .hero { grid-template-columns: 1fr; } .hero h1 { font-size: 2.2rem; }
+  .kpis { grid-template-columns: 1fr 1fr; } .pipe { grid-template-columns: 1fr; } .arrow { transform: rotate(90deg); padding: .3rem 0; }
+}
+@media (prefers-reduced-motion: reduce) { .ring-fill, .dot { animation: none; } }
+</style>
+"""
+st.markdown(CSS, unsafe_allow_html=True)
+
+
+def H(s: str):
+    """Render HTML without markdown treating indented lines as code blocks."""
+    st.markdown("".join(line.strip() for line in s.splitlines()), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------
+# 2. Models
 # ---------------------------------------------------------
 @st.cache_resource
 def load_ai_pipeline():
-    # Load all the components you trained in Colab
     scaler = joblib.load("standard_scaler.pkl")
     iso_forest = joblib.load("iso_forest.pkl")
     label_encoder = joblib.load("label_encoder.pkl")
-
     xgb_model = xgb.XGBClassifier()
     xgb_model.load_model("xgboost_model.json")
-
     return scaler, iso_forest, label_encoder, xgb_model
+
 
 try:
     scaler, iso_forest, label_encoder, xgb_model = load_ai_pipeline()
-    pipeline_ready = True
+    pipeline_ready, load_error = True, ""
 except Exception as e:
-    st.error(f"Error loading AI pipeline files. Ensure .pkl and .json files are in the directory. Details: {e}")
-    pipeline_ready = False
+    pipeline_ready, load_error = False, str(e)
+
+
+def run_pipeline(df: pd.DataFrame) -> pd.DataFrame:
+    X = df[EXPECTED_FEATURES].apply(pd.to_numeric, errors="coerce").fillna(0)
+    Xs = scaler.transform(X)
+
+    # Tier 1: Isolation Forest
+    pred = iso_forest.predict(Xs)
+    risk = -iso_forest.decision_function(Xs)
+    mask = pred == -1
+
+    # Tier 2: XGBoost, batched on the flagged flows only
+    threat = np.full(len(df), "Normal", dtype=object)
+    if mask.any():
+        ints = np.asarray(xgb_model.predict(Xs[mask])).astype(int)
+        threat[mask] = label_encoder.inverse_transform(ints)
+
+    out = df.copy()
+    out["is_anomaly"] = mask
+    out["threat_type"] = threat
+    out["risk_score"] = (pd.Series(risk).rank(pct=True) * 100).round(1).values
+    return out
+
+
+def make_demo(n: int = 1800, seed: int = 7) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    n_bad = int(n * 0.14)
+    good = pd.DataFrame({
+        "sttl": rng.choice([62, 254, 31], n - n_bad, p=[.55, .35, .10]),
+        "ct_dst_src_ltm": rng.poisson(3, n - n_bad) + 1,
+        "sbytes": rng.lognormal(6.4, 1.0, n - n_bad).round(),
+        "sload": rng.lognormal(11.0, 1.2, n - n_bad).round(1),
+    })
+    bad = pd.DataFrame({
+        "sttl": rng.choice([254, 0, 252], n_bad),
+        "ct_dst_src_ltm": rng.integers(15, 60, n_bad),
+        "sbytes": rng.lognormal(9.0, 1.3, n_bad).round(),
+        "sload": rng.lognormal(15.0, 1.4, n_bad).round(1),
+    })
+    return pd.concat([good, bad]).sample(frac=1, random_state=seed).reset_index(drop=True)
+
 
 # ---------------------------------------------------------
-# 2. UI Layout & Log Ingestion
+# 3. Chart helpers
 # ---------------------------------------------------------
-st.title("🛡️ BSNL Next-Gen Network (NGN) - NOC Anomaly Dashboard")
-st.markdown("Monitor real-time syslog metrics and detect intrusions using an Isolation Forest & XGBoost multi-tier ensemble.")
+def theme(chart, height=300):
+    return (
+        chart.properties(height=height, background="transparent")
+        .configure_view(strokeWidth=0)
+        .configure_axis(labelColor=MUTED, titleColor=MUTED, gridColor="#1B2850", domainColor=LINE,
+                        tickColor=LINE, labelFont="IBM Plex Sans", titleFont="IBM Plex Sans")
+        .configure_legend(labelColor=TEXT, titleColor=MUTED, labelFont="IBM Plex Sans", orient="bottom", symbolType="circle")
+    )
 
-with st.sidebar:
-    st.header("Log Ingestion")
-    st.write("Upload exported CSV logs containing `sttl`, `ct_dst_src_ltm`, `sbytes`, and `sload` features.")
-    uploaded_file = st.file_uploader("Upload Network Log (CSV)", type=['csv'])
 
-# ---------------------------------------------------------
-# 3. Execution Engine
-# ---------------------------------------------------------
-EXPECTED_FEATURES = ['sttl', 'ct_dst_src_ltm', 'sbytes', 'sload']
+def level_for(rate: float):
+    if rate < 0.02:
+        return "Nominal", MINT, "Traffic is inside the normal baseline."
+    if rate < 0.10:
+        return "Elevated", AMBER, "A small share of flows look unusual."
+    if rate < 0.25:
+        return "High", "#FF8A4C", "Many flows deviate from the baseline."
+    return "Critical", CORAL, "A large share of traffic is hostile."
 
-if uploaded_file is not None and pipeline_ready:
-    df = pd.read_csv(uploaded_file)
 
-    # Check for missing features
-    missing_cols = [col for col in EXPECTED_FEATURES if col not in df.columns]
-    if missing_cols:
-        st.error(f"Upload failed. Missing required network telemetry columns: {missing_cols}")
+def hero(rate=None):
+    if rate is None:
+        label, color, sub, pct, fill = "Standing by", BLUE, "Upload a log file to start a scan.", "--", 0.0
     else:
-        st.subheader("Raw Telemetry Data Preview")
-        st.dataframe(df.head(), use_container_width=True)
+        label, color, sub = level_for(rate)
+        pct, fill = f"{rate * 100:.1f}%", min(rate / 0.30, 1.0)
+    C = 326.7
+    ring = (
+        f'<svg viewBox="0 0 140 140" width="150" height="150">'
+        f'<circle cx="70" cy="70" r="52" fill="none" stroke="#1B2850" stroke-width="12"/>'
+        f'<circle class="ring-fill" cx="70" cy="70" r="52" fill="none" stroke="{color}" stroke-width="12" stroke-linecap="round" '
+        f'stroke-dasharray="{C}" stroke-dashoffset="{C * (1 - fill):.1f}" transform="rotate(-90 70 70)"/>'
+        f'<text x="70" y="72" text-anchor="middle" fill="#fff" font-size="25" font-weight="700" font-family="Sora">{pct}</text>'
+        f'<text x="70" y="92" text-anchor="middle" fill="#8C9BC4" font-size="10.5" font-family="IBM Plex Sans">anomaly rate</text></svg>'
+    )
+    live_cls, live_txt = ("live", "Models loaded") if pipeline_ready else ("live off", "Models missing")
+    H(f"""
+    <div class="hero">
+      <div>
+        <div class="{live_cls}"><span class="dot"></span>{live_txt}</div>
+        <h1>NGN threat console</h1>
+        <p>Upload syslog telemetry from the BSNL Next-Gen Network. An Isolation Forest flags the odd flows, then XGBoost names the attack.</p>
+      </div>
+      <div class="gauge">{ring}<div><div class="lvl-label">Threat level</div><div class="lvl" style="color:{color}">{label}</div><div class="sub">{sub}</div></div></div>
+    </div>
+    """)
 
-        if st.button("Run Threat Analysis Engine", type="primary"):
-            with st.spinner("Analyzing network flows through the AI pipeline..."):
 
-                # Step A: Isolate features and Scale
-                X_live = df[EXPECTED_FEATURES]
-                X_scaled = scaler.transform(X_live)
+# ---------------------------------------------------------
+# 4. Sidebar
+# ---------------------------------------------------------
+with st.sidebar:
+    H("""<div class="brand"><div class="logo">🛡️</div><div><b>NOC Console</b><span>BSNL Next-Gen Network</span></div></div>""")
+    st.markdown("##### Load telemetry")
+    uploaded_file = st.file_uploader("Network log (CSV)", type=["csv"], label_visibility="collapsed")
+    if st.button("Use demo telemetry", use_container_width=True):
+        st.session_state["demo_df"] = make_demo()
+        st.session_state.pop("results", None)
+    if uploaded_file is not None:
+        st.session_state.pop("demo_df", None)
 
-                # Step B: Tier 1 - Isolation Forest
-                iso_predictions = iso_forest.predict(X_scaled)
+    st.markdown("##### Required columns")
+    H("<div class='schema'>" + " ".join(f"<code>{c}</code>" for c in EXPECTED_FEATURES) + "</div>")
 
-                # Step C: Tier 2 - XGBoost Classification on Anomalies
-                anomalies = []
-                threat_classifications = []
+    st.markdown("##### Pipeline")
+    ok = MINT if pipeline_ready else CORAL
+    for name in ["Standard scaler", "Isolation Forest", "XGBoost classifier", "Label encoder"]:
+        H(f"<div class='chip'><span class='d' style='background:{ok}'></span>{name}</div>")
 
-                for idx, pred in enumerate(iso_predictions):
-                    if pred == -1: # -1 indicates anomaly in Isolation Forest
-                        anomalies.append(True)
-                        row_data = X_scaled[idx].reshape(1, -1)
+if not pipeline_ready:
+    hero(None)
+    st.error(f"Could not load the model files. Check that the .pkl and .json files sit next to app.py. Details: {load_error}")
+    st.stop()
 
-                        # Predict integer class, then decode to string (e.g., 'DoS', 'Exploits')
-                        attack_type_int = xgb_model.predict(row_data)[0]
-                        attack_type_str = label_encoder.inverse_transform([attack_type_int])[0]
-                        threat_classifications.append(attack_type_str)
-                    else:
-                        anomalies.append(False)
-                        threat_classifications.append("Normal")
+# ---------------------------------------------------------
+# 5. Data source
+# ---------------------------------------------------------
+df, src_key = None, None
+if uploaded_file is not None:
+    df = pd.read_csv(uploaded_file)
+    src_key = f"{uploaded_file.name}:{uploaded_file.size}"
+elif "demo_df" in st.session_state:
+    df, src_key = st.session_state["demo_df"], "demo"
 
-                # Step D: Append results to dataframe
-                results_df = df.copy()
-                results_df['is_anomaly'] = anomalies
-                results_df['threat_type'] = threat_classifications
+if st.session_state.get("results_src") != src_key:
+    st.session_state.pop("results", None)
 
-                flagged_traffic = results_df[results_df['is_anomaly'] == True]
+# ---------------------------------------------------------
+# 6. Empty state
+# ---------------------------------------------------------
+if df is None:
+    hero(None)
+    H("""
+    <div class="sec">How a scan works</div>
+    <div class="sec-sub">Every flow passes two models. Normal traffic exits at the first one.</div>
+    <div class="pipe">
+      <div class="stage"><span class="tag">Prepare</span><h4>Scale the features</h4><p>The four flow metrics are standardised with the same scaler used in training.</p></div>
+      <div class="arrow">➜</div>
+      <div class="stage hot"><span class="tag">Tier 1</span><h4>Isolation Forest</h4><p>Scores each flow against the learned baseline and separates the outliers.</p></div>
+      <div class="arrow">➜</div>
+      <div class="stage"><span class="tag">Tier 2</span><h4>XGBoost classifier</h4><p>Labels every outlier with an attack family such as DoS or Exploits.</p></div>
+    </div>
+    """)
+    st.info("Drop a CSV in the sidebar, or press **Use demo telemetry** to see the dashboard with sample flows.")
+    st.stop()
 
-                # ---------------------------------------------------------
-                # 4. Results Visualization
-                # ---------------------------------------------------------
-                st.divider()
-                col1, col2 = st.columns(2)
-                col1.metric("Total Logs Processed", len(results_df))
+missing_cols = [c for c in EXPECTED_FEATURES if c not in df.columns]
+if missing_cols:
+    hero(None)
+    st.error(f"This file is missing required columns: {', '.join(missing_cols)}. Add them and upload again.")
+    st.stop()
 
-                anomaly_count = len(flagged_traffic)
-                col2.metric(
-                    label="Critical Alerts (Anomalies)",
-                    value=anomaly_count,
-                    delta=f"{anomaly_count} threats found" if anomaly_count > 0 else "System Secure",
-                    delta_color="inverse"
-                )
+# ---------------------------------------------------------
+# 7. Run + results
+# ---------------------------------------------------------
+results = st.session_state.get("results")
+hero(None if results is None else results["is_anomaly"].mean())
 
-                if not flagged_traffic.empty:
-                    st.subheader("🚨 Detected Threats Breakdown")
+c1, c2 = st.columns([1, 3], vertical_alignment="center")
+with c1:
+    run = st.button("Run threat analysis", type="primary", use_container_width=True)
+with c2:
+    st.caption(f"{len(df):,} flows loaded from {'demo data' if src_key == 'demo' else uploaded_file.name}.")
 
-                    threat_counts = flagged_traffic['threat_type'].value_counts()
-                    chart_col, table_col = st.columns([1, 2])
+if run:
+    with st.spinner("Scoring flows through both models..."):
+        st.session_state["results"] = run_pipeline(df)
+        st.session_state["results_src"] = src_key
+    st.rerun()
 
-                    with chart_col:
-                        st.write("**Threat Classification Volume**")
-                        st.bar_chart(threat_counts, color="#ff4b4b")
+if results is None:
+    st.markdown("<div class='sec' style='margin-top:1rem'>Telemetry preview</div>", unsafe_allow_html=True)
+    st.dataframe(df.head(10), use_container_width=True)
+    st.stop()
 
-                    with table_col:
-                        st.write("**Isolated Host Logs**")
-                        st.dataframe(flagged_traffic, use_container_width=True)
-                else:
-                    st.success("✅ No anomalies detected. Network traffic is within normal baseline parameters.")
+flagged = results[results["is_anomaly"]]
+n, n_bad = len(results), len(flagged)
+counts = flagged["threat_type"].value_counts()
+top_name = counts.index[0] if n_bad else "None"
+top_share = f"{counts.iloc[0] / n_bad * 100:.0f}% of alerts" if n_bad else "No alerts raised"
+clean_pct = (1 - n_bad / n) * 100
+kc = CORAL if n_bad else MINT
+
+H(f"""
+<div class="kpis">
+  <div class="kpi" style="--c:{BLUE}"><div class="k">Flows scanned</div><div class="v">{n:,}</div><div class="s">Across all four metrics</div></div>
+  <div class="kpi" style="--c:{kc}"><div class="k">Critical alerts</div><div class="v" style="color:{kc}">{n_bad:,}</div><div class="s">{"Needs review" if n_bad else "System secure"}</div></div>
+  <div class="kpi wide" style="--c:{AMBER}"><div class="k">Most common attack</div><div class="v">{top_name}</div><div class="s">{top_share}</div></div>
+  <div class="kpi" style="--c:{MINT}"><div class="k">Clean traffic</div><div class="v">{clean_pct:.1f}%</div><div class="s">Inside baseline</div></div>
+</div>
+""")
+
+if n_bad == 0:
+    st.success("No anomalies detected. Network traffic is within normal baseline parameters.")
+    st.stop()
+
+types = list(counts.index)
+cmap = {t: THREAT_COLORS[i % len(THREAT_COLORS)] for i, t in enumerate(types)}
+cmap["Normal"] = "#3A4A7A"
+dom, rng_ = list(cmap.keys()), list(cmap.values())
+
+tab1, tab2, tab3, tab4 = st.tabs(["Overview", "Attack profile", "Flagged flows", "Raw data"])
+
+with tab1:
+    a, b = st.columns([1.5, 1])
+    with a:
+        st.markdown("<div class='sec'>Alerts across the log</div><div class='sec-sub'>Anomalies per slice of the file, in row order.</div>", unsafe_allow_html=True)
+        nb = int(min(40, max(n // 5, 5)))
+        tl = pd.DataFrame({"slice": (np.arange(n) * nb // n), "bad": results["is_anomaly"].astype(int).values})
+        tl = tl.groupby("slice", as_index=False)["bad"].sum()
+        area = alt.Chart(tl).mark_area(
+            line={"color": CORAL, "strokeWidth": 2.5}, interpolate="monotone",
+            color=alt.Gradient(gradient="linear", stops=[alt.GradientStop(color="rgba(255,92,92,.55)", offset=0),
+                                                         alt.GradientStop(color="rgba(255,92,92,0)", offset=1)],
+                               x1=1, x2=1, y1=1, y2=0),
+        ).encode(x=alt.X("slice:Q", title="Position in file", axis=alt.Axis(grid=False)),
+                 y=alt.Y("bad:Q", title="Alerts"),
+                 tooltip=[alt.Tooltip("slice:Q", title="Slice"), alt.Tooltip("bad:Q", title="Alerts")])
+        st.altair_chart(theme(area, 320), use_container_width=True)
+    with b:
+        st.markdown("<div class='sec'>Attack mix</div><div class='sec-sub'>Share of each family among alerts.</div>", unsafe_allow_html=True)
+        cdf = counts.rename_axis("threat").reset_index(name="count")
+        donut = alt.Chart(cdf).mark_arc(innerRadius=72, outerRadius=118, cornerRadius=5, padAngle=0.02).encode(
+            theta="count:Q",
+            color=alt.Color("threat:N", scale=alt.Scale(domain=dom, range=rng_), legend=alt.Legend(title=None, columns=2)),
+            tooltip=["threat", "count"],
+        )
+        st.altair_chart(theme(donut, 320), use_container_width=True)
+
+with tab2:
+    a, b = st.columns([1, 1.3])
+    with a:
+        st.markdown("<div class='sec'>Volume by attack type</div><div class='sec-sub'>Alerts per family, largest first.</div>", unsafe_allow_html=True)
+        bar = alt.Chart(counts.rename_axis("threat").reset_index(name="count")).mark_bar(
+            cornerRadiusEnd=6, height=22).encode(
+            y=alt.Y("threat:N", sort="-x", title=None, axis=alt.Axis(grid=False, labelFontSize=13)),
+            x=alt.X("count:Q", title="Alerts"),
+            color=alt.Color("threat:N", scale=alt.Scale(domain=dom, range=rng_), legend=None),
+            tooltip=["threat", "count"],
+        )
+        st.altair_chart(theme(bar, 340), use_container_width=True)
+    with b:
+        st.markdown("<div class='sec'>Where attacks sit</div><div class='sec-sub'>Bytes sent against send load, log scale. Normal flows fade into the background.</div>", unsafe_allow_html=True)
+        sample = results.sample(min(len(results), 4000), random_state=1)
+        sc = alt.Chart(sample).mark_circle().encode(
+            x=alt.X("sbytes:Q", scale=alt.Scale(type="symlog"), title="Source bytes"),
+            y=alt.Y("sload:Q", scale=alt.Scale(type="symlog"), title="Source load"),
+            color=alt.Color("threat_type:N", scale=alt.Scale(domain=dom, range=rng_), legend=alt.Legend(title=None, columns=4)),
+            opacity=alt.condition(alt.datum.is_anomaly, alt.value(0.9), alt.value(0.18)),
+            size=alt.condition(alt.datum.is_anomaly, alt.value(70), alt.value(22)),
+            tooltip=["threat_type", "sttl", "ct_dst_src_ltm", "sbytes", "sload", "risk_score"],
+        )
+        st.altair_chart(theme(sc, 340), use_container_width=True)
+
+with tab3:
+    st.markdown("<div class='sec'>Isolated host logs</div><div class='sec-sub'>Sorted by risk, highest first.</div>", unsafe_allow_html=True)
+    pick = st.multiselect("Filter by attack type", types, default=types)
+    view = flagged[flagged["threat_type"].isin(pick)].sort_values("risk_score", ascending=False)
+    st.dataframe(
+        view, use_container_width=True, height=440,
+        column_config={
+            "risk_score": st.column_config.ProgressColumn("Risk", min_value=0, max_value=100, format="%.0f"),
+            "is_anomaly": st.column_config.CheckboxColumn("Anomaly"),
+            "threat_type": st.column_config.TextColumn("Threat"),
+        },
+    )
+    st.download_button("Download flagged flows (CSV)", view.to_csv(index=False).encode(), "flagged_flows.csv", "text/csv")
+
+with tab4:
+    st.markdown("<div class='sec'>Full results</div><div class='sec-sub'>Every flow with its verdict attached.</div>", unsafe_allow_html=True)
+    st.dataframe(results, use_container_width=True, height=440)
+    st.download_button("Download all results (CSV)", results.to_csv(index=False).encode(), "threat_analysis.csv", "text/csv")
